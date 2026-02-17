@@ -1,0 +1,12 @@
+# Qubes OS KVM network device hotplug rules
+# Triggered by virtio-net device add/remove events
+
+# virtio-net devices
+SUBSYSTEM=="net", KERNEL=="eth*", DRIVERS=="virtio_net", ACTION=="add", RUN+="/usr/bin/systemctl restart --job-mode=replace qubes-network-uplink@%k.service", GOTO="QUBES-NET-KVM-END"
+SUBSYSTEM=="net", KERNEL=="eth*", DRIVERS=="virtio_net", ACTION=="remove", RUN+="/usr/bin/systemctl stop --job-mode=replace qubes-network-uplink@%k.service", GOTO="QUBES-NET-KVM-END"
+
+# tap/macvtap devices (used by KVM for VM networking)
+SUBSYSTEM=="net", KERNEL=="vif*", ACTION=="add", RUN+="/usr/bin/systemctl restart --job-mode=replace qubes-network-uplink@%k.service", GOTO="QUBES-NET-KVM-END"
+SUBSYSTEM=="net", KERNEL=="vif*", ACTION=="remove", RUN+="/usr/bin/systemctl stop --job-mode=replace qubes-network-uplink@%k.service", GOTO="QUBES-NET-KVM-END"
+
+LABEL="QUBES-NET-KVM-END"

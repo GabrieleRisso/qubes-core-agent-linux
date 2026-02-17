@@ -1,0 +1,7 @@
+#!/bin/bash
+#
+# systemd user environment generator for VCHAN_DOMAIN
+# Sets the vchan domain ID for all user services.
+#
+. /usr/lib/qubes/init/qubes-domain-id.sh 2>/dev/null || true
+echo "VCHAN_DOMAIN=${VCHAN_DOMAIN:-0}"

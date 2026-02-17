@@ -4,15 +4,23 @@ read -r disk_name
 
 set -e
 
+# Helper: find the first existing device from a list
+find_dev() {
+    for d in "$@"; do
+        [ -b "$d" ] && echo "$d" && return 0
+    done
+    echo "$1"
+}
+
 case $disk_name in
     private)
-        # force some read to refresh device size
-        head /dev/xvdb > /dev/null
-        resize2fs /dev/xvdb
+        dev=$(find_dev /dev/qubes/private /dev/xvdb /dev/vdb)
+        head "$dev" > /dev/null
+        resize2fs "$dev"
         ;;
     root)
-        # force some read to refresh device size
-        head /dev/xvda > /dev/null
+        dev=$(find_dev /dev/qubes/root /dev/xvda /dev/vda)
+        head "$dev" > /dev/null
         /usr/lib/qubes/resize-rootfs
         ;;
     *)

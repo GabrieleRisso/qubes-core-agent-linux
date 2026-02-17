@@ -192,7 +192,9 @@ Requires(pre): qubes-db
 BuildRequires: gcc
 BuildRequires: desktop-file-utils
 BuildRequires: pandoc
+%if "x%{?backend_vmm}" != "xkvm"
 BuildRequires: xen-devel
+%endif
 BuildRequires: libX11-devel
 BuildRequires: qubes-utils-devel >= 4.3.1
 BuildRequires: qubes-libvchan-%{?qubes_backend_vmm}%{?!qubes_backend_vmm:@BACKEND_VMM@}-devel
@@ -203,7 +205,7 @@ BuildRequires: systemd
 %if 0%{?rhel} >= 8
 BuildRequires: redhat-lsb
 %endif
-%if 0%{?is_opensuse}
+%if 0%{?is_opensuse} && "x%{?backend_vmm}" != "xkvm"
 # for directory ownership
 BuildRequires: xen-tools
 BuildRequires: dconf
@@ -992,6 +994,7 @@ rm -f %{name}-%{version}
 %endif
 /usr/lib/sysctl.d/20-qubes-core.conf
 %_udevrulesdir/50-qubes-mem-hotplug.rules
+%_udevrulesdir/60-qubes-block-devices.rules
 %_unitdir/user@.service.d/90-session-stop-timeout.conf
 %_bindir/qubes-serial-login
 %_bindir/qvm-copy-to-vm
@@ -1214,6 +1217,7 @@ The Qubes core startup configuration for SystemD init.
 %_unitdir/usr-local.mount
 %{_unitdir}-preset/%qubes_preset_file
 %_modulesloaddir/qubes-core.conf
+%_modulesloaddir/qubes-core-kvm.conf
 %_unitdir/abrtd.service.d/30_qubes.conf
 %_unitdir/bluetooth.service.d/30_qubes.conf
 %dir %_unitdir/boot.automount.d

@@ -1,13 +1,13 @@
 [Unit]
 # have it as  .service, not .swap, because .swap has implicit dependency on
 # .device which needs udev running already
-Description=Enable swap on /dev/xvdc1 early
+Description=Enable swap on Qubes swap device early
 DefaultDependencies=no
 Before=systemd-fsck-root.service
 
 [Service]
 Type=oneshot
-ExecStart=-/usr/sbin/swapon /dev/xvdc1
+ExecStart=-/bin/sh -c 'if [ -e /dev/qubes/swap ]; then /usr/sbin/swapon /dev/qubes/swap; elif [ -e /dev/xvdc1 ]; then /usr/sbin/swapon /dev/xvdc1; elif [ -e /dev/vdc1 ]; then /usr/sbin/swapon /dev/vdc1; fi'
 
 [Install]
 WantedBy=sysinit.target

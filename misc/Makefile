@@ -27,6 +27,7 @@ clean:
 install:
 	install -m 0755 -d $(DESTDIR)$(UDEVRULESDIR)
 	install -t $(DESTDIR)$(UDEVRULESDIR) -m 0644 50-qubes-mem-hotplug.rules
+	install -t $(DESTDIR)$(UDEVRULESDIR) -m 0644 60-qubes-block-devices.rules
 	install -m 0755 -d $(DESTDIR)$(QUBESMIMEDIR)
 	install -D -t $(DESTDIR)$(QUBESDATADIR) -m 0644 \
 	    marker-vm \

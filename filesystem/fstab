@@ -1,14 +1,20 @@
 # Accessible filesystems, by reference, are maintained under '/dev/disk'
 # See man pages fstab(5), findfs(8), mount(8) and/or blkid(8) for more info
 #
+# This fstab is written at install/template time. Symlinks in /dev/qubes/
+# (created by udev rules) provide hypervisor-agnostic paths:
+#   /dev/qubes/root    -> xvda (Xen) or vda (KVM)
+#   /dev/qubes/private -> xvdb (Xen) or vdb (KVM)
+#   /dev/qubes/swap    -> xvdc1 (Xen) or vdc1 (KVM)
+#   /dev/qubes/removable -> xvdi (Xen) or vdi (KVM)
 
-# <file system>   <mount point>     <type>  <options>            <dump> <pass>
+# <file system>       <mount point>     <type>  <options>            <dump> <pass>
 
-/dev/mapper/dmroot   /              ext4    defaults,discard,noatime    1 1
-/dev/xvdb            /rw            auto    noauto,defaults,discard,nosuid,nodev    1 2
-/dev/xvdc1           swap           swap    defaults                    0 0
-tmpfs                /dev/shm       tmpfs   defaults,size=1G            0 0
-devpts               /dev/pts       devpts  gid=5,mode=620              0 0
-sysfs                /sys           sysfs   defaults                    0 0
-proc                 /proc          proc    defaults                    0 0
-/dev/xvdi            /mnt/removable auto    noauto,user,rw              0 0
+/dev/mapper/dmroot     /              ext4    defaults,discard,noatime    1 1
+/dev/qubes/private     /rw            auto    noauto,defaults,discard,nosuid,nodev    1 2
+/dev/qubes/swap        swap           swap    defaults                    0 0
+tmpfs                  /dev/shm       tmpfs   defaults,size=1G            0 0
+devpts                 /dev/pts       devpts  gid=5,mode=620              0 0
+sysfs                  /sys           sysfs   defaults                    0 0
+proc                   /proc          proc    defaults                    0 0
+/dev/qubes/removable   /mnt/removable auto    noauto,user,rw              0 0

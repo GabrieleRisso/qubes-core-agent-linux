@@ -1,10 +1,9 @@
 [Unit]
 Description=Initialize and mount /rw and /home
-# There is a dependency on dev-xvdb.device because
-# mount-dirs.sh calls setup-rwdev.sh which
-# must happen only when /dev/xvdb has appeared.
-After=qubes-sysinit.service dev-xvdb.device
-After=systemd-fsck@dev-xvdb.service
+# Wait for the private storage device to appear.
+# The qubes/private symlink is created by udev for both xvdb (Xen) and vdb (KVM).
+After=qubes-sysinit.service dev-qubes-private.device
+After=systemd-fsck@dev-qubes-private.service
 DefaultDependencies=no
 Before=local-fs.target rw.mount usr-local.mount home.mount qubes-gui-agent.service
 

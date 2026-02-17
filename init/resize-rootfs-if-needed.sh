@@ -5,13 +5,25 @@
 
 set -e
 
-# if underlying root device is read-only, don't do anything
-if [ "$(blockdev --getro /dev/xvda)" -eq "1" ]; then
-    echo "xvda is read-only, not resizing" >&2
+# Detect root block device: xvda (Xen) or vda (KVM)
+if [ -b /dev/xvda ]; then
+    ROOT_BLK=/dev/xvda
+    ROOT_SYSBLOCK=xvda
+elif [ -b /dev/vda ]; then
+    ROOT_BLK=/dev/vda
+    ROOT_SYSBLOCK=vda
+else
+    echo "Cannot find root block device, not resizing" >&2
     exit 0
 fi
 
-sysfs_xvda="/sys/class/block/xvda"
+# if underlying root device is read-only, don't do anything
+if [ "$(blockdev --getro "$ROOT_BLK")" -eq "1" ]; then
+    echo "$ROOT_SYSBLOCK is read-only, not resizing" >&2
+    exit 0
+fi
+
+sysfs_xvda="/sys/class/block/$ROOT_SYSBLOCK"
 
 # if root filesystem is already using (almost) the whole disk
 # 203M for BIOS and /boot data

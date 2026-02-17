@@ -2,17 +2,29 @@
 
 set -e
 
+# Detect root block device: xvda (Xen) or vda (KVM)
+if [ -b /dev/xvda ]; then
+    ROOT_BLK=/dev/xvda
+    ROOT_SYSBLOCK=xvda
+    SNAP_DEV=/dev/xvdc2
+elif [ -b /dev/vda ]; then
+    ROOT_BLK=/dev/vda
+    ROOT_SYSBLOCK=vda
+    SNAP_DEV=/dev/vdc2
+else
+    echo "Cannot find root block device" >&2
+    exit 1
+fi
+
 dm_major=$(printf %x "$(grep device-mapper /proc/devices | cut -f 1 -d ' ')")
 case "$(stat -Lc %t:%T /dev/mapper/dmroot)" in
     ca:0)
-        # nothing needed, xvda used directly
+        # nothing needed, root device used directly
         ;;
     ca:3)
-        # resize partition table itself and xda3 partition
-        echo ',+' | sfdisk --no-reread --no-tell-kernel -q -N 3 /dev/xvda
-        # and reload partition table; prefer partprobe over blockdev
-        # --rereadpt, as it works on mounted partitions
-        partprobe /dev/xvda
+        # resize partition table itself and partition 3
+        echo ',+' | sfdisk --no-reread --no-tell-kernel -q -N 3 "$ROOT_BLK"
+        partprobe "$ROOT_BLK"
         udevadm settle
         ;;
     ca:*)
@@ -20,12 +32,12 @@ case "$(stat -Lc %t:%T /dev/mapper/dmroot)" in
         exit 1
         ;;
     $dm_major:*)
-        new_size=$(cat /sys/block/xvda/size)
-        ro=$(cat /sys/block/xvda/ro)
+        new_size=$(cat "/sys/block/$ROOT_SYSBLOCK/size")
+        ro=$(cat "/sys/block/$ROOT_SYSBLOCK/ro")
         if [ "$ro" -eq 1 ]; then
-            new_table="0 $new_size snapshot /dev/xvda /dev/xvdc2 N 16"
+            new_table="0 $new_size snapshot $ROOT_BLK $SNAP_DEV N 16"
         else
-            new_table="0 $new_size linear /dev/xvda 0"
+            new_table="0 $new_size linear $ROOT_BLK 0"
         fi
         dmsetup load dmroot --table "$new_table"
         dmsetup resume dmroot

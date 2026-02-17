@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Source hypervisor detection (provides QUBES_HYPERVISOR, is_xen, is_kvm)
+# shellcheck source=init/hypervisor.sh
+. /usr/lib/qubes/init/hypervisor.sh
+
 # Location of files which contains list of protected files
 PROTECTED_FILE_LIST='/etc/qubes/protected-files.d'
 PER_VM_PROTECTED_FILE_LIST='/rw/config/protected-files.d'
@@ -141,8 +145,12 @@ get_qubes_managed_iface() {
         # no qubes-managed network interface
         return
     fi
-    # Load the module explicitly here, to avoid waiting for udev doing that
-    [ -e /sys/module/xen_netfront ] || modprobe xen-netfront || :
+    # Load the appropriate network frontend module
+    if is_xen; then
+        [ -e /sys/module/xen_netfront ] || modprobe xen-netfront || :
+    else
+        [ -e /sys/module/virtio_net ] || modprobe virtio-net || :
+    fi
     qubes_iface="$(get_iface_from_mac "$mac")"
     if [ "x$qubes_iface" != "x" ]; then
         echo "$qubes_iface"

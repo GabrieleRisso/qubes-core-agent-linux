@@ -1,0 +1,18 @@
+# Qubes OS block device symlinks
+# Creates /dev/qubes/ symlinks that abstract Xen (xvd*) and KVM (vd*) devices
+
+# Xen PV block devices
+KERNEL=="xvda",  SYMLINK+="qubes/root"
+KERNEL=="xvda*", SYMLINK+="qubes/root%n"
+KERNEL=="xvdb",  SYMLINK+="qubes/private"
+KERNEL=="xvdc1", SYMLINK+="qubes/swap"
+KERNEL=="xvdd",  SYMLINK+="qubes/modules"
+KERNEL=="xvdi",  SYMLINK+="qubes/removable"
+
+# KVM virtio block devices
+KERNEL=="vda",   SYMLINK+="qubes/root"
+KERNEL=="vda*",  SYMLINK+="qubes/root%n"
+KERNEL=="vdb",   SYMLINK+="qubes/private"
+KERNEL=="vdc1",  SYMLINK+="qubes/swap"
+KERNEL=="vdd",   SYMLINK+="qubes/modules"
+KERNEL=="vdi",   SYMLINK+="qubes/removable"

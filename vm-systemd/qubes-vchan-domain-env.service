@@ -1,0 +1,13 @@
+[Unit]
+Description=Set VCHAN_DOMAIN environment for Qubes services
+DefaultDependencies=no
+Before=qubes-sysinit.service
+After=qubes-kvm-config-read.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '. /usr/lib/qubes/init/qubes-domain-id.sh && echo "VCHAN_DOMAIN=$VCHAN_DOMAIN" > /run/qubes/vchan-domain.env'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

@@ -6,18 +6,27 @@
 
 set -e
 
-dev=/dev/xvdb
+# Use hypervisor-agnostic symlink, fall back to direct device names
+if [ -e /dev/qubes/private ]; then
+    dev=/dev/qubes/private
+elif [ -e /dev/xvdb ]; then
+    dev=/dev/xvdb
+elif [ -e /dev/vdb ]; then
+    dev=/dev/vdb
+else
+    dev=/dev/qubes/private
+fi
 max_size=10485760  # check at most 10 MiB
 
 if [ -e "$dev" ] ; then
-    # The private /dev/xvdb device is present.
+    # The private storage device is present.
 
-    # check if private.img (xvdb) is empty - all zeros
+    # check if private.img is empty - all zeros
     private_size=$(( $(blockdev --getsz "$dev") * 512))
-    if [ $private_size -gt $max_size ]; then
+    if [ "$private_size" -gt "$max_size" ]; then
         private_size=$max_size
     fi
-    if cmp --bytes $private_size "$dev" /dev/zero >/dev/null && { blkid -p "$dev" >/dev/null; [ $? -eq 2 ]; }; then
+    if cmp --bytes "$private_size" "$dev" /dev/zero >/dev/null && { blkid -p "$dev" >/dev/null; [ $? -eq 2 ]; }; then
         # the device is empty, create filesystem
         echo "Virgin boot of the VM: creating private.img filesystem on $dev" >&2
         # journals are only useful on reboot, so don't write one in a DispVM

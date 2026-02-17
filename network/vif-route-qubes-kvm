@@ -1,0 +1,173 @@
+#!/bin/bash --
+#============================================================================
+# /etc/qubes/kvm/vif-route-qubes
+#
+# KVM version of the vif-route-qubes script.
+# Uses qubesdb instead of xenstore for configuration retrieval and
+# works with virtio-net interfaces instead of Xen PV netfront.
+#
+# Usage:
+# vif-route-qubes-kvm (add|remove|online|offline)
+#
+# Environment vars:
+# vif         vif interface name (required).
+#============================================================================
+
+set -e
+
+# Source Qubes library
+. /usr/lib/qubes/init/functions
+
+# shellcheck disable=SC2154
+: "${vif:?}"
+: "${command:=$1}"
+
+log() {
+    logger -t "vif-route-qubes-kvm" -- "$@"
+}
+
+do_without_error() {
+    "$@" 2>/dev/null || true
+}
+
+conntrack_purge () {
+    local n output deleted msg
+    n='(0|[1-9][0-9]*)' msg='flow entries have been deleted\.$'
+    deleted="^conntrack v$n\\.$n\\.$n \\(conntrack-tools\\): $n $msg"
+    output=$(LC_ALL=C exec conntrack -D "$@" 2>&1 >/dev/null) || :
+    [[ "$output" =~ $deleted ]]
+}
+
+# Network Hooks for triggering supplementary actions on AppVM connect
+network_hooks() {
+    local hook_command="$1"
+    local hook_vif="$2"
+    local hook_addr="$3"
+
+    # KVM: get interface type from qubesdb instead of xenstore
+    local vif_type
+    vif_type=$(qubesdb-read "/qubes-net-vif-type/${hook_vif}" 2>/dev/null || echo "virtio")
+
+    if [ -d /rw/config/network-hooks.d ]; then
+        for hook in /rw/config/network-hooks.d/*; do
+            if [ -x "$hook" ]; then
+                log "Executing network-hook $(basename "$hook")..."
+                do_without_error "${hook}" "${hook_command}" "${hook_vif}" "${vif_type}" "${hook_addr}"
+            fi
+        done
+    fi
+}
+
+# Read IP configuration from qubesdb
+ip=$(qubesdb-read "/qubes-ip" 2>/dev/null || :)
+if [ -n "${ip}" ]; then
+    for addr in ${ip}; do
+        if [ -z "$ip4" ] && [[ "$addr" = *.* ]]; then
+            ip4="$addr"
+        elif [ -z "$ip6" ] && [[ "$addr" = *:* ]]; then
+            ip6="$addr"
+        fi
+    done
+
+    netvm_ip="$ip4"
+    netvm_gw_ip=$(qubesdb-read /qubes-netvm-gateway)
+    netvm_gw_ip6=$(qubesdb-read /qubes-netvm-gateway6 || :)
+    netvm_dns1_ip=$(qubesdb-read /qubes-netvm-primary-dns)
+    netvm_dns2_ip=$(qubesdb-read /qubes-netvm-secondary-dns)
+
+    back_ip="$netvm_gw_ip"
+    back_ip6="$netvm_gw_ip6"
+
+    appvm_gw_ip="$(qubesdb-read "/mapped-ip/$ip4/visible-gateway" 2>/dev/null || :)"
+    appvm_ip="$(qubesdb-read "/mapped-ip/$ip4/visible-ip" 2>/dev/null || :)"
+fi
+
+# Extract domain ID from interface name (vifNN.N pattern) or use qubesdb
+if [[ "$vif" =~ ^vif([0-9]+)\.([0-9]+)$ ]]; then
+    domid=${BASH_REMATCH[1]}
+else
+    domid=$(qubesdb-read /qubes-domain-id 2>/dev/null || echo "1")
+fi
+
+readonly max_domid=32752
+if (( domid > max_domid )); then
+    log "domid $domid too large"
+    exit 1
+fi
+metric=$(( max_domid - domid ))
+
+case "$command" in
+    online|add)
+        echo 1 >"/proc/sys/net/ipv4/conf/${vif}/proxy_arp" 2>/dev/null || :
+        ipcmd='add'
+        nftables_cmd=add
+        cmdprefix=''
+        read -r ipv6_disabled < "/proc/sys/net/ipv6/conf/$vif/disable_ipv6" || ipv6_disabled=1
+        ;;
+    offline|remove)
+        if [ -e "/sys/class/net/$vif" ]; then
+            do_without_error ip link set dev "${vif}" down
+        fi
+        ipcmd='del'
+        nftables_cmd=delete
+        cmdprefix='do_without_error'
+        ipv6_disabled=0
+        ;;
+esac
+
+if [ "${ip}" ]; then
+    # KVM: read MAC from qubesdb instead of xenstore
+    peer_mac=$(qubesdb-read "/qubes-mac" 2>/dev/null) ||
+        peer_mac=$(cat "/sys/class/net/$vif/address" 2>/dev/null) ||
+        { log "cannot obtain peer MAC"; exit 1; }
+    readonly peer_mac
+    [[ "$peer_mac" =~ ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$ ]] ||
+        { log "bad mac address $peer_mac"; exit 1; }
+
+    for addr in ${ip}; do
+        if [[ "$addr" = *:* ]]; then
+            ipt=ip6
+        else
+            ipt=ip
+        fi
+        conntrack_purge -s "$addr" || :
+        conntrack_purge -d "$addr" || :
+
+        if [[ "$command" = 'online' || "$command" = 'add' ]]; then
+            ip -- neighbour add to "$addr" \
+                dev "$vif" lladdr "$peer_mac" nud permanent 2>/dev/null || :
+        fi
+        nft "$nftables_cmd element $ipt qubes allowed { \"$vif\" . $addr }
+$nftables_cmd element $ipt qubes downstream { $addr }" 2>/dev/null || :
+    done
+fi
+
+if [[ "$command" = "online" || "$command" = "add" ]]; then
+    ip link set dev "${vif}" group 2 up
+fi
+
+if [ "${ip}" ]; then
+    for addr in ${ip}; do
+        if [[ "$addr" = *:* ]] && [[ "$ipv6_disabled" != '0' ]]; then
+            log "Cannot set IPv6 route to ${addr}, IPv6 disabled in the kernel"
+            continue
+        fi
+        if [ "$ipcmd" = "add" ] || [ -e "/sys/class/net/$vif" ]; then
+            ${cmdprefix} ip route "${ipcmd}" "${addr}" dev "${vif}" metric "$metric"
+        fi
+        network_hooks "${command}" "${vif}" "${addr}"
+    done
+    if [ "$ipcmd" = "add" ] || [ -e "/sys/class/net/$vif" ]; then
+        ${cmdprefix} ip addr "${ipcmd}" "${back_ip}/32" dev "${vif}"
+    fi
+    if [[ -n "${back_ip6}" ]] && [[ "${back_ip6}" != "fe80:"* ]] && [[ "$ipv6_disabled" = '0' ]]; then
+        if [ "$ipcmd" = "add" ] || [ -e "/sys/class/net/$vif" ]; then
+            ${cmdprefix} ip addr "${ipcmd}" "${back_ip6}/128" dev "${vif}"
+            echo 1 >"/proc/sys/net/ipv6/conf/${vif}/proxy_ndp"
+        fi
+    fi
+else
+    network_hooks "${command}" "${vif}"
+fi
+
+log "Successful vif-route-qubes-kvm $command for $vif."

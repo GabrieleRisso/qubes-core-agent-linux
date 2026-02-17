@@ -14,7 +14,9 @@ if [ -n "${network}" ]; then
         readonly modprobe_fail_cmd='false'
     fi
 
-    modprobe netbk 2> /dev/null || modprobe xen-netback || "${modprobe_fail_cmd}"
+    if is_xen; then
+        modprobe netbk 2> /dev/null || modprobe xen-netback || "${modprobe_fail_cmd}"
+    fi
     /usr/lib/qubes/qubes-setup-dnat-to-ns
     echo "1" > /proc/sys/net/ipv4/ip_forward
     # enable also IPv6 forwarding, if IPv6 is enabled

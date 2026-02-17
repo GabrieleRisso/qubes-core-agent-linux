@@ -1,0 +1,14 @@
+[Unit]
+Description=Read initial QubesDB config from virtio-serial (KVM)
+DefaultDependencies=no
+ConditionPathExists=/dev/virtio-ports/org.qubes-os.qubesdb
+Before=qubes-sysinit.service
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/qubesdb-config-read
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

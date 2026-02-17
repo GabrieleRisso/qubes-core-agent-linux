@@ -7,7 +7,7 @@
 set -e
 
 /usr/lib/qubes/init/setup-rwdev.sh
-if [ -e /dev/xvdb ] ; then mount /rw ; fi
+if [ -e /dev/qubes/private ] || [ -e /dev/xvdb ] || [ -e /dev/vdb ]; then mount /rw ; fi
 /usr/lib/qubes/init/setup-rw.sh
 
 if is_custom_persist_enabled; then

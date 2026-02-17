@@ -12,10 +12,25 @@ DEFAULT_ENABLED_APPVM="qubes-update-check meminfo-writer tracker evolution-data-
 DEFAULT_ENABLED_TEMPLATEVM="$DEFAULT_ENABLED_APPVM updates-proxy-setup software-rendering"
 DEFAULT_ENABLED="meminfo-writer software-rendering"
 
-# Wait for xenbus initialization
-while [ ! -e /dev/xen/xenbus ]; do
-  sleep 0.1
-done
+# Wait for hypervisor-specific communication channel
+if is_xen; then
+    # Xen: wait for xenbus device
+    while [ ! -e /dev/xen/xenbus ]; do
+        sleep 0.1
+    done
+elif is_kvm; then
+    # KVM: wait for virtio-serial qubesdb config port or vchan socket directory
+    timeout=300
+    while [ ! -e /dev/virtio-ports/org.qubes-os.qubesdb ] && \
+          [ ! -d /var/run/vchan ] && \
+          [ "$timeout" -gt 0 ]; do
+        sleep 0.1
+        timeout=$((timeout - 1))
+    done
+    if [ "$timeout" -eq 0 ]; then
+        echo "WARNING: Timed out waiting for qubesdb virtio-serial port" >&2
+    fi
+fi
 
 [ -d /sys/fs/selinux ] && selinux_flag=Z || selinux_flag=
 
@@ -23,8 +38,11 @@ mkdir "-p$selinux_flag" /run/qubes /run/qubes-service /run/xen-hotplug /run/xen
 chgrp qubes /run/qubes
 chmod 0775 /run/qubes
 
-if [ -e /sys/module/grant_table/parameters/free_per_iteration ]; then
-    echo 10000 > /sys/module/grant_table/parameters/free_per_iteration
+# Xen grant table tuning (not applicable to KVM)
+if is_xen; then
+    if [ -e /sys/module/grant_table/parameters/free_per_iteration ]; then
+        echo 10000 > /sys/module/grant_table/parameters/free_per_iteration
+    fi
 fi
 
 # Set default services depending on VM type

@@ -1,0 +1,14 @@
+[Unit]
+Description=QubesDB device hotplug watcher (KVM)
+ConditionPathExists=!/dev/xen/xenbus
+After=qubes-sysinit.service qubes-db.service
+Requires=qubes-db.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/qubes/qubesdb-hotplug-watcher.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

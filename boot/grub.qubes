@@ -3,7 +3,9 @@
 GRUB_DEVICE=/dev/mapper/dmroot
 GRUB_DISABLE_LINUX_UUID=true
 GRUB_DISABLE_OS_PROBER=true
-GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX root=/dev/mapper/dmroot console=tty0 console=hvc0"
+# Include both Xen (hvc0) and KVM (ttyS0) consoles; the non-existent one
+# is harmlessly ignored by the kernel
+GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX root=/dev/mapper/dmroot console=tty0 console=hvc0 console=ttyS0"
 # make SWIOTLB smaller - it isn't really needed unless PCI passthrough is used,
 # and even then, 16MB is enough
 GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX swiotlb=8192"
