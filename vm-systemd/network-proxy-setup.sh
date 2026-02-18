@@ -14,7 +14,8 @@ if [ -n "${network}" ]; then
         readonly modprobe_fail_cmd='false'
     fi
 
-    if is_xen; then
+    if is_xen && ! uses_vchan_socket; then
+        # Native Xen uses xen-netback; xen-shim and KVM use virtio-net
         modprobe netbk 2> /dev/null || modprobe xen-netback || "${modprobe_fail_cmd}"
     fi
     /usr/lib/qubes/qubes-setup-dnat-to-ns

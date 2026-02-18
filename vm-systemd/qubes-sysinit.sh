@@ -12,14 +12,10 @@ DEFAULT_ENABLED_APPVM="qubes-update-check meminfo-writer tracker evolution-data-
 DEFAULT_ENABLED_TEMPLATEVM="$DEFAULT_ENABLED_APPVM updates-proxy-setup software-rendering"
 DEFAULT_ENABLED="meminfo-writer software-rendering"
 
-# Wait for hypervisor-specific communication channel
-if is_xen; then
-    # Xen: wait for xenbus device
-    while [ ! -e /dev/xen/xenbus ]; do
-        sleep 0.1
-    done
-elif is_kvm; then
-    # KVM: wait for virtio-serial qubesdb config port or vchan socket directory
+# Wait for hypervisor-specific communication channel.
+# Under xen-shim: hypervisor appears as Xen but IPC uses vchan-socket,
+# so we wait for the virtio-serial port (same as native KVM).
+if uses_vchan_socket; then
     timeout=300
     while [ ! -e /dev/virtio-ports/org.qubes-os.qubesdb ] && \
           [ ! -d /var/run/vchan ] && \
@@ -30,6 +26,10 @@ elif is_kvm; then
     if [ "$timeout" -eq 0 ]; then
         echo "WARNING: Timed out waiting for qubesdb virtio-serial port" >&2
     fi
+elif is_xen; then
+    while [ ! -e /dev/xen/xenbus ]; do
+        sleep 0.1
+    done
 fi
 
 [ -d /sys/fs/selinux ] && selinux_flag=Z || selinux_flag=
@@ -38,8 +38,9 @@ mkdir "-p$selinux_flag" /run/qubes /run/qubes-service /run/xen-hotplug /run/xen
 chgrp qubes /run/qubes
 chmod 0775 /run/qubes
 
-# Xen grant table tuning (not applicable to KVM)
-if is_xen; then
+# Xen grant table tuning (native Xen only; under xen-shim the grant
+# table is emulated by QEMU and this parameter may not exist)
+if is_xen && ! uses_vchan_socket; then
     if [ -e /sys/module/grant_table/parameters/free_per_iteration ]; then
         echo 10000 > /sys/module/grant_table/parameters/free_per_iteration
     fi

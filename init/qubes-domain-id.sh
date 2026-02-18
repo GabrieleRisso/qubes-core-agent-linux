@@ -2,9 +2,10 @@
 #
 # qubes-domain-id.sh - Determine and export the local domain ID
 #
-# Under Xen, the domain ID comes from /proc/xen/xsd_port or similar.
-# Under KVM, we read it from qubesdb (/qubes-domain-id) or from the
-# virtio-serial initial config cache, or derive it from libvirt metadata.
+# Under Xen, the domain ID comes from xenstore.
+# Under KVM (and xen-shim), we read it from the virtio-serial initial
+# config cache (written by qubesdb-config-read at boot), or from
+# qubesdb after the vchan-socket connection is up.
 #
 # Exports VCHAN_DOMAIN for use by vchan-socket connections.
 #
@@ -12,17 +13,9 @@
 . /usr/lib/qubes/init/hypervisor.sh
 
 get_domain_id() {
-    # Method 1: Read from qubesdb (works after qubesdb is connected)
-    if command -v qubesdb-read >/dev/null 2>&1; then
-        local qdb_id
-        qdb_id=$(qubesdb-read /qubes-domain-id 2>/dev/null)
-        if [ -n "$qdb_id" ] && [ "$qdb_id" -gt 0 ] 2>/dev/null; then
-            echo "$qdb_id"
-            return 0
-        fi
-    fi
-
-    # Method 2: Read from initial config cache (KVM boot-time injection)
+    # Method 1: Read from initial config cache (KVM/xen-shim boot-time
+    # injection).  This is available before qubesdb-daemon connects and
+    # is the primary source when using vchan-socket transport.
     if [ -f /var/run/qubes/qubesdb-initial.cache ]; then
         local cached_id
         cached_id=$(grep '^/qubes-domain-id=' /var/run/qubes/qubesdb-initial.cache 2>/dev/null | cut -d= -f2-)
@@ -32,9 +25,20 @@ get_domain_id() {
         fi
     fi
 
-    # Method 3: Xen-specific: read from /proc/xen
-    if is_xen && [ -f /proc/xen/xsd_port ]; then
-        # Under Xen, the domain ID is available via xenstore or /proc
+    # Method 2: Read from qubesdb (works after qubesdb is connected)
+    if command -v qubesdb-read >/dev/null 2>&1; then
+        local qdb_id
+        qdb_id=$(qubesdb-read /qubes-domain-id 2>/dev/null)
+        if [ -n "$qdb_id" ] && [ "$qdb_id" -gt 0 ] 2>/dev/null; then
+            echo "$qdb_id"
+            return 0
+        fi
+    fi
+
+    # Method 3: Xen-specific: read from xenstore (only for native Xen,
+    # not xen-shim; under xen-shim QEMU's xenstore emulation is local
+    # and may not have the domain ID).
+    if is_xen && ! uses_vchan_socket && [ -f /proc/xen/xsd_port ]; then
         local xen_domid
         xen_domid=$(xenstore-read domid 2>/dev/null)
         if [ -n "$xen_domid" ]; then
@@ -53,8 +57,8 @@ get_domain_id() {
         fi
     fi
 
-    # Fallback: domain 0 means dom0, use 1 as default for guest VMs
-    if is_kvm; then
+    # Fallback: use 1 for vchan-socket guests, 0 for Xen
+    if uses_vchan_socket; then
         echo "1"
     else
         echo "0"
@@ -62,7 +66,6 @@ get_domain_id() {
     return 1
 }
 
-# Determine and export the domain ID
 if [ -z "${VCHAN_DOMAIN:-}" ]; then
     VCHAN_DOMAIN=$(get_domain_id)
 fi

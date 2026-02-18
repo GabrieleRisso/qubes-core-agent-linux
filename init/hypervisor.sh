@@ -2,24 +2,58 @@
 #
 # Qubes OS hypervisor detection utility
 #
-# Detects whether the VM is running under Xen or KVM and exports
-# QUBES_HYPERVISOR=xen|kvm for use by boot scripts.
+# Exports two variables:
+#   QUBES_HYPERVISOR  = xen | kvm         (what the guest kernel sees)
+#   QUBES_TRANSPORT   = xen | vchan-socket (IPC transport for qubesdb/qrexec)
 #
-# Detection methods (in order of preference):
-#   1. /sys/hypervisor/type (set by Xen)
+# Under native Xen: QUBES_HYPERVISOR=xen,  QUBES_TRANSPORT=xen
+# Under native KVM: QUBES_HYPERVISOR=kvm,  QUBES_TRANSPORT=vchan-socket
+# Under xen-shim:   QUBES_HYPERVISOR=xen,  QUBES_TRANSPORT=vchan-socket
+#
+# The transport variable resolves the ambiguity when QEMU's Xen HVM
+# emulation is active: the guest sees Xen CPUID leaves but the actual
+# qubesdb/qrexec communication goes over virtio-vsock / vchan-socket.
+#
+# Detection methods for QUBES_HYPERVISOR (in order of preference):
+#   1. /sys/hypervisor/type (set by Xen or QEMU Xen emulation)
 #   2. Device tree hypervisor node (ARM64 KVM detection)
 #   3. cpuid leaf 0x40000000 vendor string (via /proc/cpuinfo, x86 only)
 #   4. Xen/KVM-specific device nodes
-#   5. systemd-detect-virt (fallback)
-#   6. DMI/SMBIOS product name
+#   5. Virtio bus presence
+#   6. systemd-detect-virt (fallback)
+#   7. DMI/SMBIOS product name
 #
-# Architecture notes:
-#   - On x86_64, cpuid and DMI are the primary detection methods
-#   - On aarch64, device tree and virtio device presence are used instead
-#     (ARM has no cpuid instruction and may lack DMI/SMBIOS)
+# Detection for QUBES_TRANSPORT:
+#   - /dev/virtio-ports/org.qubes-os.qubesdb present -> vchan-socket
+#   - /var/run/qubes/qubesdb-initial.cache with /qubes-transport -> use it
+#   - Otherwise: same as QUBES_HYPERVISOR
 #
 
 QUBES_HOST_ARCH="$(uname -m)"
+
+detect_transport() {
+    # The virtio-serial QubesDB port is the definitive indicator that
+    # dom0 injected config via the KVM path (even under xen-shim).
+    if [ -c /dev/virtio-ports/org.qubes-os.qubesdb ] || \
+       [ -e /dev/virtio-ports/org.qubes-os.qubesdb ]; then
+        echo "vchan-socket"
+        return 0
+    fi
+
+    # Check the boot-time config cache written by qubesdb-config-read
+    if [ -f /var/run/qubes/qubesdb-initial.cache ]; then
+        local cached_transport
+        cached_transport=$(grep '^/qubes-transport=' /var/run/qubes/qubesdb-initial.cache 2>/dev/null | cut -d= -f2-)
+        if [ -n "$cached_transport" ]; then
+            echo "$cached_transport"
+            return 0
+        fi
+    fi
+
+    # No virtio-serial port and no cache -> native hypervisor transport
+    echo ""
+    return 1
+}
 
 detect_hypervisor() {
     # Method 1: /sys/hypervisor/type (Xen-specific sysfs node, works on all arches)
@@ -35,8 +69,6 @@ detect_hypervisor() {
     fi
 
     # Method 2: Device tree hypervisor node (ARM64 KVM/Xen detection)
-    # On ARM64, QEMU's 'virt' machine type exposes hypervisor info via DT.
-    # KVM sets compatible = "linux,kvm" in the /hypervisor DT node.
     if [ "$QUBES_HOST_ARCH" = "aarch64" ]; then
         if [ -f /sys/firmware/devicetree/base/hypervisor/compatible ]; then
             local dt_compat
@@ -53,9 +85,7 @@ detect_hypervisor() {
             esac
         fi
 
-        # ARM64: Check for KVM via PSCI (Power State Coordination Interface)
-        # KVM on ARM64 uses PSCI for CPU management; its presence with
-        # virtio devices strongly indicates KVM.
+        # ARM64: PSCI + virtio devices -> KVM
         if [ -d /sys/firmware/devicetree/base/psci ]; then
             if [ -d /sys/bus/virtio/devices ] && \
                [ "$(ls -A /sys/bus/virtio/devices 2>/dev/null)" ]; then
@@ -66,7 +96,6 @@ detect_hypervisor() {
     fi
 
     # Method 3: Check /proc/cpuinfo for hypervisor vendor (x86 only)
-    # ARM64 does not have cpuid; this method is skipped on aarch64.
     if [ "$QUBES_HOST_ARCH" = "x86_64" ] && [ -f /proc/cpuinfo ]; then
         if grep -qi 'KVMKVMKVM\|KVM' /proc/cpuinfo 2>/dev/null; then
             echo "kvm"
@@ -142,7 +171,20 @@ if [ -z "${QUBES_HYPERVISOR:-}" ]; then
     QUBES_HYPERVISOR=$(detect_hypervisor)
 fi
 
+if [ -z "${QUBES_TRANSPORT:-}" ]; then
+    QUBES_TRANSPORT=$(detect_transport) || true
+    if [ -z "$QUBES_TRANSPORT" ]; then
+        # No explicit transport detected; derive from hypervisor type
+        if [ "$QUBES_HYPERVISOR" = "kvm" ]; then
+            QUBES_TRANSPORT="vchan-socket"
+        else
+            QUBES_TRANSPORT="xen"
+        fi
+    fi
+fi
+
 export QUBES_HYPERVISOR
+export QUBES_TRANSPORT
 
 is_xen() {
     [ "$QUBES_HYPERVISOR" = "xen" ]
@@ -150,6 +192,14 @@ is_xen() {
 
 is_kvm() {
     [ "$QUBES_HYPERVISOR" = "kvm" ]
+}
+
+is_xen_shim() {
+    [ "$QUBES_HYPERVISOR" = "xen" ] && [ "$QUBES_TRANSPORT" = "vchan-socket" ]
+}
+
+uses_vchan_socket() {
+    [ "$QUBES_TRANSPORT" = "vchan-socket" ]
 }
 
 is_aarch64() {

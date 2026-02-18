@@ -11,8 +11,8 @@ set -euf
 
 . /usr/lib/qubes/init/functions
 
-# Only run under KVM
-is_kvm || exit 0
+# Only run when using vchan-socket transport (KVM or xen-shim)
+uses_vchan_socket || exit 0
 
 log() {
     logger -t "qubesdb-hotplug" -- "$@"

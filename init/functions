@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Source hypervisor detection (provides QUBES_HYPERVISOR, is_xen, is_kvm)
+# Source hypervisor detection (provides QUBES_HYPERVISOR, QUBES_TRANSPORT,
+# is_xen, is_kvm, is_xen_shim, uses_vchan_socket, is_aarch64)
 # shellcheck source=init/hypervisor.sh
 . /usr/lib/qubes/init/hypervisor.sh
 
@@ -145,8 +146,9 @@ get_qubes_managed_iface() {
         # no qubes-managed network interface
         return
     fi
-    # Load the appropriate network frontend module
-    if is_xen; then
+    # Load the appropriate network frontend module.
+    # Under xen-shim, networking uses virtio-net (not xen-netfront).
+    if is_xen && ! uses_vchan_socket; then
         [ -e /sys/module/xen_netfront ] || modprobe xen-netfront || :
     else
         [ -e /sys/module/virtio_net ] || modprobe virtio-net || :
