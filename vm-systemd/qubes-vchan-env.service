@@ -1,0 +1,15 @@
+[Unit]
+Description=Qubes vchan environment bootstrap
+DefaultDependencies=no
+After=qubesdb-config-read.service
+Before=qubes-db.service qubes-qrexec-agent.service
+ConditionPathExists=|/dev/virtio-ports/org.qubes-os.qubesdb
+ConditionPathExists=|/var/run/qubes/qubesdb-initial.cache
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/qubes/init/qubes-vchan-env.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
