@@ -1143,6 +1143,9 @@ rm -f %{name}-%{version}
 %endif
 /etc/xen/scripts/vif-qubes-nat.sh
 /etc/xen/scripts/vif-route-qubes
+%dir /etc/qubes/kvm
+/etc/qubes/kvm/vif-route-qubes
+/usr/lib/qubes/qubesdb-hotplug-watcher.sh
 %_unitdir/qubes-firewall.service
 %_unitdir/qubes-iptables.service
 %_unitdir/qubes-antispoof.service
@@ -1218,6 +1221,9 @@ The Qubes core startup configuration for SystemD init.
 %{_unitdir}-preset/%qubes_preset_file
 %_modulesloaddir/qubes-core.conf
 %_modulesloaddir/qubes-core-kvm.conf
+%_unitdir/qubes-kvm-config-read.service
+%_unitdir/qubes-kvm-hotplug-watcher.service
+%_unitdir/qubes-vchan-domain-env.service
 %_unitdir/abrtd.service.d/30_qubes.conf
 %_unitdir/bluetooth.service.d/30_qubes.conf
 %dir %_unitdir/boot.automount.d
