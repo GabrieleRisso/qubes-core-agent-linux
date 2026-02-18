@@ -1,0 +1,659 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# qubes-vhost-backend — vhost-user-net backend daemon for sys-net
+#
+# Runs inside sys-net (the VM that owns the physical NIC via VFIO
+# passthrough).  Bridges traffic between the physical NIC and one or
+# more vhost-user Unix sockets that QEMU instances (in dom0) connect to
+# on behalf of client VMs.
+#
+# Architecture:
+#   Physical NIC  <-->  raw socket / AF_PACKET  <-->  vhost-user sockets
+#
+# Each downstream client VM gets its own vhost-user socket.  The backend
+# multiplexes Ethernet frames between the physical interface and all
+# connected clients using MAC-address based forwarding.
+#
+# Copyright (C) 2024-2026  Qubes OS KVM Contributors
+# License: GPL-2.0-or-later
+
+import argparse
+import asyncio
+import ctypes
+import ctypes.util
+import errno
+import fcntl
+import logging
+import os
+import signal
+import socket
+import struct
+import sys
+import time
+
+log = logging.getLogger("qubes.vhost-backend")
+
+# ── Constants ────────────────────────────────────────────────────────
+
+VHOST_SOCKET_DIR = "/var/run/qubes/vhost"
+ETH_P_ALL = 0x0003
+ETH_FRAME_LEN = 1514
+ETH_ALEN = 6
+SIOCGIFINDEX = 0x8933
+IFF_TAP = 0x0002
+IFF_NO_PI = 0x1000
+IFF_VNET_HDR = 0x4000
+TUNSETIFF = 0x400454CA
+PACKET_AUXDATA = 8
+VIRTIO_NET_HDR_SIZE = 12
+RECONNECT_DELAY = 2.0
+MAX_FRAME_SIZE = 65536
+
+
+# ── Ethernet helpers ─────────────────────────────────────────────────
+
+def mac_bytes(mac_str):
+    """Parse 'aa:bb:cc:dd:ee:ff' to 6-byte bytes."""
+    return bytes(int(b, 16) for b in mac_str.split(":"))
+
+
+def mac_str(mac_bytes_val):
+    """Format 6 bytes as 'aa:bb:cc:dd:ee:ff'."""
+    return ":".join("{:02x}".format(b) for b in mac_bytes_val)
+
+
+def is_broadcast(mac):
+    """Check if a MAC address is broadcast or multicast."""
+    return mac[0] & 1 != 0
+
+
+# ── Raw socket on physical NIC ──────────────────────────────────────
+
+class RawNICSocket:
+    """AF_PACKET raw socket bound to a physical network interface.
+
+    Sends and receives raw Ethernet frames.
+    """
+
+    def __init__(self, ifname):
+        self.ifname = ifname
+        self.sock = socket.socket(
+            socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)
+        )
+        self.sock.setblocking(False)
+        self.sock.bind((ifname, 0))
+
+        # Get the interface index
+        ifreq = struct.pack("16sI", ifname.encode(), 0)
+        res = fcntl.ioctl(self.sock.fileno(), SIOCGIFINDEX, ifreq)
+        self.ifindex = struct.unpack("16sI", res)[1]
+        log.info("Bound raw socket to %s (ifindex=%d)", ifname, self.ifindex)
+
+    def fileno(self):
+        return self.sock.fileno()
+
+    def recv_frame(self):
+        """Receive a single Ethernet frame. Returns bytes or None."""
+        try:
+            data = self.sock.recv(MAX_FRAME_SIZE)
+            return data
+        except BlockingIOError:
+            return None
+        except OSError as exc:
+            if exc.errno == errno.EAGAIN:
+                return None
+            raise
+
+    def send_frame(self, frame):
+        """Send a raw Ethernet frame out the physical interface."""
+        try:
+            self.sock.send(frame)
+        except BlockingIOError:
+            log.debug("NIC TX buffer full, dropping frame")
+        except OSError as exc:
+            if exc.errno != errno.EAGAIN:
+                log.warning("NIC send error: %s", exc)
+
+    def close(self):
+        self.sock.close()
+
+
+# ── TAP device for local VM networking ───────────────────────────────
+
+class TAPDevice:
+    """A TAP device that can be used for local in-VM bridging.
+
+    When the vhost-user sockets aren't directly accessible (e.g. across
+    VM boundaries), a TAP device bridges the gap.
+    """
+
+    def __init__(self, name="vhost-tap0"):
+        self.name = name
+        self.fd = os.open("/dev/net/tun", os.O_RDWR | os.O_NONBLOCK)
+        ifreq = struct.pack(
+            "16sH14s",
+            name.encode(),
+            IFF_TAP | IFF_NO_PI | IFF_VNET_HDR,
+            b"\x00" * 14,
+        )
+        fcntl.ioctl(self.fd, TUNSETIFF, ifreq)
+        log.info("Opened TAP device: %s", name)
+
+    def fileno(self):
+        return self.fd
+
+    def recv_frame(self):
+        try:
+            return os.read(self.fd, MAX_FRAME_SIZE)
+        except BlockingIOError:
+            return None
+
+    def send_frame(self, frame):
+        try:
+            os.write(self.fd, frame)
+        except BlockingIOError:
+            log.debug("TAP TX buffer full, dropping frame")
+        except OSError as exc:
+            if exc.errno != errno.EAGAIN:
+                log.warning("TAP send error: %s", exc)
+
+    def close(self):
+        os.close(self.fd)
+
+
+# ── Client connection (one per downstream VM) ───────────────────────
+
+class VhostClient:
+    """Represents a connected downstream VM via a vhost-user socket.
+
+    In the vhost-user protocol the QEMU instance (running the guest)
+    connects to us as a client.  We act as the server side of the
+    Unix socket.
+
+    For the initial implementation we use a simplified frame-passing
+    protocol over the Unix socket.  Each message is:
+        [4-byte length (network order)][ethernet frame]
+
+    This will be upgraded to the full vhost-user protocol once the
+    DPDK/libvhost-user integration is ready.  The socket path and
+    lifecycle are already correct for that migration.
+    """
+
+    def __init__(self, name, sock, addr):
+        self.name = name
+        self.sock = sock
+        self.addr = addr
+        self.mac = None  # Learned from first frame
+        self.rx_packets = 0
+        self.tx_packets = 0
+        self.rx_bytes = 0
+        self.tx_bytes = 0
+        self._recv_buf = bytearray()
+
+    def fileno(self):
+        return self.sock.fileno()
+
+    def send_frame(self, frame):
+        """Send an Ethernet frame to this client VM."""
+        try:
+            hdr = struct.pack("!I", len(frame))
+            self.sock.sendall(hdr + frame)
+            self.tx_packets += 1
+            self.tx_bytes += len(frame)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            raise ConnectionError(
+                "Client {} disconnected".format(self.name)
+            )
+
+    def recv_frame(self):
+        """Receive an Ethernet frame from this client VM.
+
+        Returns the frame bytes, or None if no complete frame is ready.
+        """
+        try:
+            chunk = self.sock.recv(MAX_FRAME_SIZE)
+            if not chunk:
+                raise ConnectionError(
+                    "Client {} disconnected".format(self.name)
+                )
+            self._recv_buf.extend(chunk)
+        except BlockingIOError:
+            pass
+        except OSError as exc:
+            if exc.errno == errno.EAGAIN:
+                pass
+            else:
+                raise ConnectionError(
+                    "Client {} error: {}".format(self.name, exc)
+                )
+
+        # Try to parse a complete frame from the buffer
+        if len(self._recv_buf) < 4:
+            return None
+        frame_len = struct.unpack("!I", self._recv_buf[:4])[0]
+        if frame_len > MAX_FRAME_SIZE:
+            raise ConnectionError(
+                "Client {} sent oversized frame ({})".format(
+                    self.name, frame_len
+                )
+            )
+        if len(self._recv_buf) < 4 + frame_len:
+            return None
+
+        frame = bytes(self._recv_buf[4 : 4 + frame_len])
+        del self._recv_buf[: 4 + frame_len]
+
+        self.rx_packets += 1
+        self.rx_bytes += len(frame)
+
+        # Learn MAC from first frame
+        if self.mac is None and len(frame) >= ETH_ALEN * 2:
+            self.mac = frame[ETH_ALEN : ETH_ALEN * 2]
+            log.info(
+                "Learned MAC %s for client %s",
+                mac_str(self.mac),
+                self.name,
+            )
+
+        return frame
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+# ── Main backend daemon ──────────────────────────────────────────────
+
+class VhostBackend:
+    """Main vhost-user-net backend process.
+
+    Multiplexes Ethernet frames between the physical NIC and all
+    connected client VMs via vhost-user Unix sockets.
+
+    MAC learning table maps destination MAC -> VhostClient.
+    Broadcast/multicast frames are forwarded to all clients and the NIC.
+    """
+
+    def __init__(self, nic_ifname, socket_dir=VHOST_SOCKET_DIR):
+        self.nic = RawNICSocket(nic_ifname)
+        self.socket_dir = socket_dir
+        self.clients = {}  # name -> VhostClient
+        self.mac_table = {}  # MAC (bytes) -> VhostClient
+        self.server_socks = {}  # path -> server socket
+        self.running = False
+        self.loop = None
+
+    def _create_server_socket(self, sock_path):
+        """Create a Unix server socket for a client VM to connect to."""
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.setblocking(False)
+        server.bind(sock_path)
+        os.chmod(sock_path, 0o660)
+        server.listen(1)
+        self.server_socks[sock_path] = server
+        log.info("Listening on vhost-user socket: %s", sock_path)
+        return server
+
+    def _scan_and_listen(self):
+        """Scan the socket directory for socket files we should serve.
+
+        Socket files are named ``<our-vm-name>-to-<client-vm>.sock``.
+        """
+        our_name = self._get_vm_name()
+        if not our_name:
+            log.warning("Cannot determine VM name, using glob pattern")
+            return
+
+        try:
+            entries = os.listdir(self.socket_dir)
+        except FileNotFoundError:
+            os.makedirs(self.socket_dir, mode=0o750, exist_ok=True)
+            entries = []
+
+        for entry in entries:
+            if not entry.startswith(our_name + "-to-"):
+                continue
+            if not entry.endswith(".sock"):
+                continue
+            sock_path = os.path.join(self.socket_dir, entry)
+            if sock_path not in self.server_socks:
+                self._create_server_socket(sock_path)
+
+    @staticmethod
+    def _get_vm_name():
+        """Read this VM's name from QubesDB."""
+        try:
+            import qubesdb
+            qdb = qubesdb.QubesDB()
+            name = qdb.read("/name")
+            if name:
+                return name.decode().strip()
+        except Exception:
+            pass
+        # Fallback: hostname
+        return socket.gethostname()
+
+    async def _handle_nic_readable(self):
+        """Called when the physical NIC has a frame ready."""
+        frame = self.nic.recv_frame()
+        if frame is None or len(frame) < ETH_ALEN * 2:
+            return
+
+        dst_mac = frame[:ETH_ALEN]
+
+        if is_broadcast(dst_mac):
+            # Forward to all connected clients
+            disconnected = []
+            for name, client in self.clients.items():
+                try:
+                    client.send_frame(frame)
+                except ConnectionError:
+                    disconnected.append(name)
+            for name in disconnected:
+                self._remove_client(name)
+        else:
+            # Unicast: look up MAC table
+            client = self.mac_table.get(dst_mac)
+            if client is not None:
+                try:
+                    client.send_frame(frame)
+                except ConnectionError:
+                    self._remove_client(client.name)
+            # If not in MAC table, the frame is for us or unknown; drop.
+
+    async def _handle_client_readable(self, client):
+        """Called when a client VM has sent a frame."""
+        try:
+            frame = client.recv_frame()
+        except ConnectionError:
+            self._remove_client(client.name)
+            return
+
+        if frame is None or len(frame) < ETH_ALEN * 2:
+            return
+
+        src_mac = frame[ETH_ALEN : ETH_ALEN * 2]
+        dst_mac = frame[:ETH_ALEN]
+
+        # Update MAC learning table
+        if src_mac and not is_broadcast(src_mac):
+            self.mac_table[src_mac] = client
+
+        if is_broadcast(dst_mac):
+            # Forward to NIC and all other clients
+            self.nic.send_frame(frame)
+            disconnected = []
+            for name, other in self.clients.items():
+                if other is client:
+                    continue
+                try:
+                    other.send_frame(frame)
+                except ConnectionError:
+                    disconnected.append(name)
+            for name in disconnected:
+                self._remove_client(name)
+        else:
+            # Check if destination is another local client
+            dst_client = self.mac_table.get(dst_mac)
+            if dst_client is not None and dst_client is not client:
+                try:
+                    dst_client.send_frame(frame)
+                except ConnectionError:
+                    self._remove_client(dst_client.name)
+            else:
+                # Forward to physical NIC
+                self.nic.send_frame(frame)
+
+    async def _accept_client(self, server_sock, sock_path):
+        """Accept a new client connection on a vhost-user server socket."""
+        try:
+            conn, addr = server_sock.accept()
+            conn.setblocking(False)
+        except BlockingIOError:
+            return
+        except OSError:
+            return
+
+        # Extract client VM name from socket path
+        basename = os.path.basename(sock_path)
+        # Format: <netvm>-to-<clientvm>.sock
+        parts = basename.rsplit("-to-", 1)
+        if len(parts) == 2:
+            client_name = parts[1].replace(".sock", "")
+        else:
+            client_name = "unknown-{}".format(len(self.clients))
+
+        # Disconnect previous client with same name if any
+        if client_name in self.clients:
+            self._remove_client(client_name)
+
+        client = VhostClient(client_name, conn, addr)
+        self.clients[client_name] = client
+        log.info(
+            "Client %s connected via %s", client_name, sock_path
+        )
+
+        # Register for read events
+        self.loop.add_reader(
+            client.fileno(),
+            lambda c=client: asyncio.ensure_future(
+                self._handle_client_readable(c)
+            ),
+        )
+
+    def _remove_client(self, name):
+        """Remove and clean up a disconnected client."""
+        client = self.clients.pop(name, None)
+        if client is None:
+            return
+
+        log.info(
+            "Client %s disconnected (rx=%d/%d tx=%d/%d)",
+            name,
+            client.rx_packets,
+            client.rx_bytes,
+            client.tx_packets,
+            client.tx_bytes,
+        )
+
+        try:
+            self.loop.remove_reader(client.fileno())
+        except (ValueError, OSError):
+            pass
+
+        # Remove from MAC table
+        stale_macs = [
+            mac for mac, c in self.mac_table.items() if c is client
+        ]
+        for mac in stale_macs:
+            del self.mac_table[mac]
+
+        client.close()
+
+    async def _periodic_scan(self):
+        """Periodically scan for new socket files to listen on."""
+        while self.running:
+            self._scan_and_listen()
+            await asyncio.sleep(5.0)
+
+    async def run(self):
+        """Main event loop."""
+        self.loop = asyncio.get_event_loop()
+        self.running = True
+
+        os.makedirs(self.socket_dir, mode=0o750, exist_ok=True)
+        self._scan_and_listen()
+
+        # Register NIC for read events
+        self.loop.add_reader(
+            self.nic.fileno(),
+            lambda: asyncio.ensure_future(self._handle_nic_readable()),
+        )
+
+        # Register server sockets for accept events
+        for path, server in self.server_socks.items():
+            self.loop.add_reader(
+                server.fileno(),
+                lambda s=server, p=path: asyncio.ensure_future(
+                    self._accept_client(s, p)
+                ),
+            )
+
+        # Notify systemd
+        _sd_notify("READY=1")
+
+        # Start periodic scanner
+        scan_task = asyncio.ensure_future(self._periodic_scan())
+
+        log.info("vhost-user backend running on %s", self.nic.ifname)
+
+        # Wait for shutdown
+        stop_event = asyncio.Event()
+
+        def _signal_handler():
+            self.running = False
+            stop_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            self.loop.add_signal_handler(sig, _signal_handler)
+
+        await stop_event.wait()
+
+        scan_task.cancel()
+        self._shutdown()
+
+    def _shutdown(self):
+        """Clean shutdown."""
+        log.info("Shutting down vhost-user backend")
+
+        # Disconnect all clients
+        for name in list(self.clients.keys()):
+            self._remove_client(name)
+
+        # Close server sockets
+        for path, server in self.server_socks.items():
+            try:
+                self.loop.remove_reader(server.fileno())
+            except (ValueError, OSError):
+                pass
+            server.close()
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+        # Close NIC
+        try:
+            self.loop.remove_reader(self.nic.fileno())
+        except (ValueError, OSError):
+            pass
+        self.nic.close()
+
+        _sd_notify("STOPPING=1")
+
+
+# ── systemd notification ─────────────────────────────────────────────
+
+def _sd_notify(state):
+    """Send notification to systemd, if available."""
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr[0] == "@":
+        addr = "\0" + addr[1:]
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        sock.connect(addr)
+        sock.sendall(state.encode())
+        sock.close()
+    except OSError:
+        pass
+
+
+# ── CLI entry point ──────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Qubes vhost-user-net backend daemon"
+    )
+    parser.add_argument(
+        "--interface",
+        "-i",
+        default=None,
+        help="Physical NIC interface name (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--socket-dir",
+        "-d",
+        default=VHOST_SOCKET_DIR,
+        help="Directory for vhost-user sockets",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        default=False,
+        help="Enable verbose logging",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
+        stream=sys.stderr,
+    )
+
+    ifname = args.interface
+    if ifname is None:
+        ifname = _detect_physical_nic()
+        if ifname is None:
+            log.error("No physical NIC found. Specify with --interface.")
+            sys.exit(1)
+
+    backend = VhostBackend(ifname, args.socket_dir)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(backend.run())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()
+
+
+def _detect_physical_nic():
+    """Auto-detect the first physical (non-virtual) NIC."""
+    net_dir = "/sys/class/net"
+    try:
+        for ifname in sorted(os.listdir(net_dir)):
+            if ifname == "lo":
+                continue
+            # Skip virtual interfaces
+            device_path = os.path.join(net_dir, ifname, "device")
+            if not os.path.exists(device_path):
+                continue
+            # Skip virtio devices (those are our own guest interfaces)
+            driver_path = os.path.realpath(
+                os.path.join(device_path, "driver")
+            )
+            driver_name = os.path.basename(driver_path)
+            if driver_name in ("virtio-pci", "virtio_net"):
+                continue
+            log.info("Auto-detected physical NIC: %s", ifname)
+            return ifname
+    except OSError:
+        pass
+    return None
+
+
+if __name__ == "__main__":
+    main()

@@ -18,6 +18,20 @@ set -e
 # Source Qubes library
 . /usr/lib/qubes/init/functions
 
+# ── vhost-user mode detection ──────────────────────────────────
+# When the net-backend feature is set to 'vhost-user', networking
+# is handled by the qubes-vhost-backend/qubes-vhost-bridge daemons.
+# The tap-based routing setup in this script is not needed.
+if [ -f /var/run/qubes-service/vhost-backend ] || \
+   [ -f /var/run/qubes-service/vhost-bridge ]; then
+    vhost_mode=$(qubesdb-read /qubes-service/net-backend 2>/dev/null || true)
+    if [ "$vhost_mode" = "vhost-user" ]; then
+        logger -t "vif-route-qubes-kvm" -- \
+            "vhost-user mode active, skipping tap routing setup for $1"
+        exit 0
+    fi
+fi
+
 # shellcheck disable=SC2154
 : "${vif:?}"
 : "${command:=$1}"

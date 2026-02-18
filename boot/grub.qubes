@@ -3,15 +3,23 @@
 GRUB_DEVICE=/dev/mapper/dmroot
 GRUB_DISABLE_LINUX_UUID=true
 GRUB_DISABLE_OS_PROBER=true
-# Include both Xen (hvc0) and KVM (ttyS0) consoles; the non-existent one
-# is harmlessly ignored by the kernel
-GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX root=/dev/mapper/dmroot console=tty0 console=hvc0 console=ttyS0"
+
+ARCH="$(uname -m)"
+if [ "$ARCH" = "aarch64" ]; then
+    # ARM64 VM consoles: virtio console (ttyAMA0) and VGA (tty0)
+    GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX root=/dev/mapper/dmroot console=tty0 console=ttyAMA0"
+else
+    # Include both Xen (hvc0) and KVM (ttyS0) consoles; the non-existent one
+    # is harmlessly ignored by the kernel
+    GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX root=/dev/mapper/dmroot console=tty0 console=hvc0 console=ttyS0"
+    # switch default clocksource to 'tsc' - it's much faster, and safe under Qubes OS
+    GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX clocksource=tsc"
+fi
+
 # make SWIOTLB smaller - it isn't really needed unless PCI passthrough is used,
 # and even then, 16MB is enough
 GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX swiotlb=8192"
 # add noresume - to avoid a 30 second hang on Debian HVM boot as it tries to
 # locate swap space for hibernation
 GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX noresume"
-# switch default clocksource to 'tsc' - it's much faster, and safe under Qubes OS
-GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX clocksource=tsc"
 GRUB_TIMEOUT=0

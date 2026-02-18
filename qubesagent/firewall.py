@@ -461,10 +461,17 @@ class NftablesWorker(FirewallWorker):
         ips = self.get_connected_ips(family)
         if ips:
             addr = '{' + ', '.join(ips) + '}'
-            irule = 'iifname != "vif*" {family_name} saddr {addr} drop\n'.format(
-                family_name=family_name, addr=addr)
-            orule = 'oifname != "vif*" {family_name} daddr {addr} drop\n'.format(
-                family_name=family_name, addr=addr)
+            # Build anti-spoofing rules for both vif* and vhost* interfaces
+            vif_patterns = self._detect_vif_patterns()
+            irules = []
+            orules = []
+            for pat in vif_patterns:
+                irules.append(
+                    'iifname != {pat} {family_name} saddr {addr} drop\n'.format(
+                        pat=pat, family_name=family_name, addr=addr))
+                orules.append(
+                    'oifname != {pat} {family_name} daddr {addr} drop\n'.format(
+                        pat=pat, family_name=family_name, addr=addr))
 
             nft_input += (
                 'table {family_name} {table} {{\n'
@@ -478,8 +485,8 @@ class NftablesWorker(FirewallWorker):
             ).format(
                 family_name=family_name,
                 table=table,
-                irule=irule,
-                orule=orule,
+                irule='    '.join(irules),
+                orule='    '.join(orules),
             )
 
         self.run_nft(nft_input)
@@ -633,7 +640,44 @@ class NftablesWorker(FirewallWorker):
         else:
             self.apply_rules_family(source, rules, 4)
 
+    def _detect_vif_patterns(self):
+        """Detect interface name patterns for nftables rules.
+
+        In vhost-user mode, the guest-facing interfaces may have
+        different names than the traditional 'vif*' pattern.  Check
+        QubesDB for the net-backend feature to determine which patterns
+        to use.
+        """
+        patterns = ['"vif*"']
+        try:
+            backend = self.qdb.read('/qubes-service/vhost-backend')
+            if backend and backend.strip():
+                patterns.append('"vhost*"')
+        except Exception:
+            pass
+        # Also check for vhost tap devices
+        if os.path.exists('/var/run/qubes-service/vhost-backend'):
+            patterns.append('"vhost*"')
+        if os.path.exists('/var/run/qubes-service/vhost-bridge'):
+            patterns.append('"vhost*"')
+        return patterns
+
     def init(self):
+        vif_patterns = self._detect_vif_patterns()
+        # Build the iifname match expression; if we have multiple
+        # patterns we need to check each one
+        if len(vif_patterns) == 1:
+            iifname_accept = 'meta iifname != {} accept'.format(
+                vif_patterns[0])
+        else:
+            # Accept traffic that doesn't match ANY of our VM interface
+            # patterns (i.e. host-originated traffic)
+            iifname_accept = 'meta iifname != {} accept'.format(
+                vif_patterns[0])
+            for pat in vif_patterns[1:]:
+                iifname_accept += '\n    meta iifname != {} accept'.format(
+                    pat)
+
         nft_init = (
             'table {family} qubes-firewall {{\n'
             '  set dns-addr {{\n'
@@ -645,7 +689,7 @@ class NftablesWorker(FirewallWorker):
             '    type filter hook forward priority 0;\n'
             '    policy drop;\n'
             '    ct state established,related accept\n'
-            '    meta iifname != "vif*" accept\n'
+            '    {iifname_accept}\n'
             '    jump qubes-forward\n'
             '  }}\n'
             '  chain prerouting {{\n'
@@ -661,7 +705,8 @@ class NftablesWorker(FirewallWorker):
         nft_init = ''.join(
             nft_init.format(
                 family_num=family_num,
-                family='ip6' if family_num == 6 else 'ip')
+                family='ip6' if family_num == 6 else 'ip',
+                iifname_accept=iifname_accept)
             for family_num in (4, 6))
         self.run_nft(nft_init)
 
